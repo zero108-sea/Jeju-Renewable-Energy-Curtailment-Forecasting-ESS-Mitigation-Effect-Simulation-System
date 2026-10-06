@@ -7,15 +7,28 @@ AI 서버 (Python/FastAPI) — Backend(Java/Spring Boot)가 REST로 호출하는
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.schemas import EssSimulateRequest, EssSimulateResponse, PredictRequest, PredictResponse
 from app.services import ess_simulation
-from app.services.predict import predict as run_predict
+from app.services.predict import predict as run_predict, warmup
+
+# 기동 시 모델을 미리 읽어 /health가 실제 준비 상태를 말할 수 있게 한다.
+# 지연 로딩이면 health가 ok여도 첫 predict가 실패할 수 있다 (통신규격 v1.1 05장 지적 사항).
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    warmup()        # 첫 요청 지연을 없앤다 (약 800ms -> 160ms)
+    yield
+
 
 app = FastAPI(
+    lifespan=lifespan,
     title="출력제어 예측 AI 서버",
     description="제주 재생에너지 출력제어 예측 및 ESS 완화효과 시뮬레이션 — 내부 AI 서버 (Backend 전용)",
     version="0.1.0",
@@ -53,7 +66,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """모델 적재 여부까지 보고한다 — 상수 ok는 헬스체크 역할을 못 한다.
+
+    ready=false면 아티팩트가 없다는 뜻이고 missing에 이름이 들어간다. Backend는 이 값을
+    보고 AI 서버 호출을 보류하거나 경고를 띄울 수 있다.
+    """
+    # lifespan이 돌지 않은 경우(컨텍스트 매니저 없이 TestClient를 쓰면 그렇다)에도 정확해야
+    # 하므로 매번 확인한다. _load가 lru_cache라 두 번째부터는 dict 조회 수준이다.
+    st = warmup()
+    return {"status": "ok" if st["ready"] else "degraded", **st}
 
 
 @app.post("/predict", response_model=PredictResponse)

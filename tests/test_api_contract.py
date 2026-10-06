@@ -199,6 +199,26 @@ class TestEssValueRange:
         assert r.status_code == 422 and r.json()["error_code"] == "OUT_OF_RANGE"
 
 
-def test_health는_200이다():
-    r = client.get("/health")
-    assert r.status_code == 200 and r.json()["status"] == "ok"
+class TestHealth:
+    """상수 ok는 헬스체크 역할을 못 한다 — 모델 적재 여부를 보고해야 한다 (v1.2).
+
+    지연 로딩이던 때는 /health가 ok인데 첫 predict가 실패할 수 있었다.
+    """
+
+    def test_200이고_필수_키가_있다(self):
+        r = client.get("/health")
+        assert r.status_code == 200
+        j = r.json()
+        assert {"status", "loaded", "missing", "ready"} <= set(j), j
+
+    @needs_artifacts
+    def test_아티팩트가_있으면_ready다(self):
+        with TestClient(app) as c:          # lifespan을 실제로 돌려 워밍업을 태운다
+            j = c.get("/health").json()
+        assert j["ready"] is True and j["status"] == "ok", j
+        assert j["missing"] == [] and j["loaded"] > 0, j
+
+    def test_ready와_status가_일관된다(self):
+        j = client.get("/health").json()
+        assert (j["status"] == "ok") == (j["ready"] is True), j
+        assert (j["missing"] == []) == (j["ready"] is True), j

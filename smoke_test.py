@@ -30,7 +30,10 @@ def check(name, cond, detail=""):
 
 
 print("== /health ==")
-check("health ok", client.get("/health").json() == {"status": "ok"})
+_h = client.get("/health").json()
+# /health는 상수가 아니라 모델 적재 상태를 보고한다 (v1.2). ready=false면 아티팩트 누락이다.
+check("health 응답 모양", {"status", "loaded", "missing", "ready"} <= set(_h))
+check(f"모델 적재 완료 (loaded={_h.get('loaded')}, missing={_h.get('missing')})", _h.get("ready") is True)
 
 print("== /predict solar ==")
 r = post({"energy_type": "solar", "region": "남원읍", "target_date": "2023-06-15", "weather": weather24})

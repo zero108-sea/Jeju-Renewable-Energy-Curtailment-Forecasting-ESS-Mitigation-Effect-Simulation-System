@@ -79,6 +79,45 @@ def _thresholds() -> dict:
         return json.load(f)
 
 
+def warmup() -> dict:
+    """서버 기동 시 모델을 미리 로드한다. 반환값은 /health가 그대로 쓴다.
+
+    [왜 필요한가]
+    _load가 lru_cache라 첫 요청 때 디스크에서 읽는다. 그래서 /health가 ok를 반환해도
+    **첫 /predict가 실패할 수 있었다** — 헬스체크의 목적을 달성하지 못한다.
+    기동 시 한 번 읽어두면 (1) 아티팩트 누락을 즉시 알 수 있고 (2) 첫 요청 지연(약 800ms)이
+    사라진다.
+
+    아티팩트가 없어도 기동 자체는 막지 않는다. 서버가 뜨지 않으면 원인을 볼 창구가 없어진다 —
+    대신 /health가 ready=false와 누락 목록을 보여준다.
+    """
+    from app.serving_config import PATH_KEYS, artifact_name
+
+    want = [f"converter_{e}" for e in ("solar", "wind")]
+    want += [artifact_name(*_spec(k)) for k in PATH_KEYS]
+    optional = ["curtailment_stage2_wind", "radiation_estimator"]
+
+    loaded, missing = [], []
+    for n in want:
+        try:
+            _load(n); loaded.append(n)
+        except Exception:                                        # noqa: BLE001
+            missing.append(n)
+    for n in optional:
+        if _optional(n) is not None:
+            loaded.append(n)
+    try:
+        _thresholds()
+    except Exception:                                            # noqa: BLE001
+        pass
+    return {"loaded": len(loaded), "missing": missing, "ready": not missing}
+
+
+def _spec(key: str) -> tuple[str, bool, bool]:
+    return ("solar" if key.startswith("solar") else "wind",
+            "demand" in key, "crossp" in key)
+
+
 def _optional(name: str) -> dict | None:
     try:
         return _load(name)
