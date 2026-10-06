@@ -9,13 +9,18 @@
 # API가 과거 예보를 보관하지 않는다 — 응답이 오는 가장 오래된 분석시각이 하루 전이다.
 # 놓친 날은 되돌릴 수 없고, 그만큼 검증 표본이 영구히 비게 된다.
 #
-# [왜 하루 네 번인가 — 10시 한 번으로는 놓친다]
+# [왜 10시부터 23시까지 매시인가 — 네 번으로도 놓쳤다]
 # 처음에는 10시 한 번만 걸었는데 첫날 실행되지 않았다(launchd runs=0). StartCalendarInterval은
-# 그 시각에 맥이 깨어 있어야 발동하고, 잠들어 있으면 그 실행을 건너뛴다. 하루를 놓치면
-# API에 과거 예보 보관이 없어 영구히 비게 되므로 10/12/14/16시 네 번으로 늘렸다.
+# 그 시각에 맥이 깨어 있어야 발동하고, 잠들어 있으면 그 실행을 건너뛴다(깬 뒤 보충 실행도
+# 없었다). 그래서 10/12/14/16시 네 번으로 늘렸다.
 #
-# 이미 24시간을 받아둔 (거래일, 분석시각)이면 스크립트가 API를 호출하지 않고 끝내므로
-# 네 번 걸어도 낭비가 없다.
+# **그런데 그것으로도 놓쳤다.** 10-04·10-05 이틀 모두 낮 시간대에 덮개를 닫아두어 네 슬롯이
+# 전부 수면 중에 지나갔고, 거래일 10-06·10-07분 예보가 영구히 비었다(10-07분은 10-06에
+# 수동 실행으로 겨우 건졌다). 노트북에서 '특정 시각'을 믿을 수 없다는 뜻이다.
+#
+# 그래서 안전창(아래 참고) 전체에 매시로 깔았다 — '10시 이후 처음 깨어 있는 시각에 받는다'에
+# 가깝게 동작한다. 이미 24시간을 받아둔 (거래일, 분석시각)이면 스크립트가 API를 호출하지 않고
+# 끝내므로 열네 번 걸어도 네트워크 비용은 첫 성공 한 번뿐이다.
 #
 # [왜 10시부터인가]
 # 거래일 D의 자료를 받으려면 D-1 09:00 KST(단기예보 08시 발표 + KIM 생산 완료) 이후여야 하고,
@@ -67,9 +72,19 @@ cat > "$PLIST" <<EOF
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
     <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
     <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
     <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>0</integer></dict>
   </array>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
@@ -78,12 +93,12 @@ EOF
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "✅ 등록 완료 — 매일 10·12·14·16시 실행 (이미 받은 날은 API 호출 없이 끝남)"
+echo "✅ 등록 완료 — 매일 10~23시 매시 실행 (이미 받은 날은 API 호출 없이 끝남)"
 echo "   로그:   $LOG"
 echo "   상태:   launchctl print gui/$(id -u)/$LABEL | head -20"
 echo "   즉시실행: launchctl kickstart -k gui/$(id -u)/$LABEL"
 echo "   해제:   bash scripts/setup_daily_collect.sh remove"
 echo
-echo "⚠ 네 시각 모두 맥이 꺼져 있거나 잠들어 있으면 그 날은 건너뜁니다."
+echo "⚠ 10~23시 내내 맥이 꺼져 있거나 잠들어 있으면 그 날은 건너뜁니다."
 echo "  API 보관이 하루뿐이라 놓친 날은 되돌릴 수 없습니다. 며칠에 한 번 로그를 확인하고,"
 echo "  놓친 날이 보이면 그날 07시 전까지는 collect로 복구할 수 있습니다."
