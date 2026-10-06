@@ -25,10 +25,22 @@ from app.model_io import MODELS_DIR, converter_predict_mwh, load_artifact
 from app.schemas import EnergyType, HourlyPrediction, PredictRequest, PredictResponse
 from app.serving_config import artifact_name
 
+# 기댓값은 확률의 '크기'에 비례한다. 그런데 신제도 구간(2024-06~)에서는 확률 크기가 검증되지
+# 않았다 — 2025년 Brier 스킬스코어가 −0.234로 상수 예측기보다 나쁘다(models/new_regime_eval.csv).
+# 순위는 살아 있지만(AUC 0.900) 크기를 곱한 값의 근거는 그만큼 약해진다. 값을 null로 바꾸면
+# 이미 이 필드를 쓰는 Backend 계약이 깨지므로, 조건을 note로 알린다.
+NEW_REGIME_START = "2024-06-01"
+
 ESS_WARNING = (
     "expected_curtailment_mwh = curtailment_probability x E[제어량|제어 발생]로 계산한 '기댓값'입니다. "
     "총합 추정에는 쓸 수 있으나 개별 시간의 제어량 크기가 아니므로 /ess/simulate의 "
     "hourly_curtailment_mwh로 넣지 마세요 — 흡수율이 크게 과대평가됩니다(README '알려진 한계' 참고)."
+)
+
+NEW_REGIME_WARNING = (
+    " 또한 target_date가 입찰제도 전환(2024-06) 이후입니다. 이 구간에서는 확률의 '크기'가 "
+    "검증되지 않았으므로(2025년 Brier 스킬스코어 −0.234 — 상수 예측기보다 나쁨) 확률을 곱해 만든 "
+    "이 기댓값의 근거도 약합니다. 순위(어느 시간이 더 위험한가)는 유효하니 그쪽을 쓰세요."
 )
 
 # 타 발전원 발전량을 '컨버터 예측'으로 학습한 변형(_crossp)을 서빙한다. 실측으로 학습한
@@ -308,7 +320,15 @@ def predict(req: PredictRequest) -> PredictResponse:
                 f"등급(상위 5%)으로 표시하세요.")
         note = f"{note} {hint}" if note else hint
 
+    # 재학습해도 model_used(경로 이름)는 그대로이므로, 추적에는 학습 시각이 필요하다.
+    trained_at = (classifier.get("meta") or {}).get("trained_at")
+    # 신제도 구간이면 기댓값의 근거가 약하다는 것을 함께 알린다 (값 자체는 유지 — 계약 보존).
+    if any(h.expected_curtailment_mwh is not None for h in hourly) and \
+            str(req.target_date) >= NEW_REGIME_START:
+        note = (note or "") + NEW_REGIME_WARNING
+
     return PredictResponse(
+        model_trained_at=trained_at,
         energy_type=energy_type, region=req.region, target_date=req.target_date,
         hourly=hourly, model_used=clf_name, note=note,
         operational_threshold=thr.get("threshold"),

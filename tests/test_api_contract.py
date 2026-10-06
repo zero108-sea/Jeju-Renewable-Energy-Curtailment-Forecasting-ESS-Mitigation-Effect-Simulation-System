@@ -116,6 +116,34 @@ class TestResponseShape:
         assert len(j["hourly"]) == 24
         assert {"hour", "generation_forecast_mwh", "curtailment_probability"} <= set(j["hourly"][0])
 
+    def test_모델_학습시각이_실린다(self):
+        """model_used는 경로 이름이라 재학습해도 안 바뀐다 — 추적에는 학습 시각이 필요하다.
+
+        예측 결과를 저장한 뒤 '이 수치는 어느 모델이 낸 것인가'를 되물을 때 유일한 단서다.
+        """
+        from datetime import datetime
+
+        j = post().json()
+        assert j.get("model_trained_at"), j
+        datetime.fromisoformat(j["model_trained_at"])        # ISO 8601이어야 한다
+
+    def test_학습시각이_아티팩트와_일치한다(self):
+        from app.model_io import load_artifact
+
+        j = post().json()
+        meta = load_artifact(j["model_used"])["meta"]
+        assert j["model_trained_at"] == meta["trained_at"], (j["model_trained_at"], meta["trained_at"])
+
+    def test_신제도_구간이면_기댓값의_근거가_약하다고_알린다(self):
+        """확률 크기가 검증되지 않은 구간(2024-06~)에서 기댓값을 곱하면 근거가 약하다.
+
+        값을 null로 바꾸면 Backend 계약이 깨지므로 note로 알린다.
+        """
+        new = post(target_date="2026-10-07", demand_forecast_mw=[620.0] * 24).json()
+        old = post(target_date="2023-06-01", demand_forecast_mw=[620.0] * 24).json()
+        assert "Brier" in (new.get("note") or ""), new.get("note")
+        assert "Brier" not in (old.get("note") or ""), old.get("note")
+
     def test_태양광은_expected_curtailment가_null이다(self):
         """07장 사유 — 태양광은 제어량이 집계되지 않아 2단계 모델이 없다."""
         j = post(energy_type="solar", demand_forecast_mw=[600.0] * 24).json()

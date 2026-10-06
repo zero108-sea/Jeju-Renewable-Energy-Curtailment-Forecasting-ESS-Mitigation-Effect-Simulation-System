@@ -181,6 +181,15 @@ class PredictResponse(BaseModel):
         None,
         description="임계값 선정 구간의 양성 표본이 충분했는지(50건 이상). false면 임계값 판정 금지",
     )
+    model_trained_at: Optional[str] = Field(
+        None,
+        description=(
+            "curtailment_probability를 산출한 모델이 학습된 시각(ISO 8601, UTC). "
+            "**어느 아티팩트가 이 예측을 냈는지 추적하는 값이다** — model_used는 경로 이름이라 "
+            "재학습해도 바뀌지 않지만 이 값은 바뀐다. 예측 결과를 저장한다면 함께 남길 것. "
+            "나중에 '이 수치는 어느 모델이 낸 것인가'를 되물을 때 유일한 단서가 된다."
+        ),
+    )
     note: Optional[str] = Field(
         None, description="태양광 응답에는 expected_curtailment_mwh가 null인 이유를 항상 포함"
     )

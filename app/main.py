@@ -7,6 +7,8 @@ AI 서버 (Python/FastAPI) — Backend(Java/Spring Boot)가 REST로 호출하는
 """
 from __future__ import annotations
 
+import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -21,9 +23,17 @@ from app.services.predict import predict as run_predict, warmup
 # 지연 로딩이면 health가 ok여도 첫 predict가 실패할 수 있다 (통신규격 v1.1 05장 지적 사항).
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+log = logging.getLogger("ai_server")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    warmup()        # 첫 요청 지연을 없앤다 (약 800ms -> 160ms)
+    st = warmup()   # 첫 요청 지연을 없앤다 (약 800ms -> 160ms)
+    log.info("warmup loaded=%s ready=%s missing=%s", st["loaded"], st["ready"], st["missing"])
     yield
 
 
@@ -62,6 +72,21 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         if loc:
             msg = f"{msg} (위치: {loc})"
     return JSONResponse(status_code=422, content={"error_code": code, "message": msg})
+
+
+@app.middleware("http")
+async def _access_log(request: Request, call_next):
+    """요청 한 줄 로깅. 운영 중 무엇이 있었는지 남지 않으면 사후에 알 방법이 없다.
+
+    본문은 남기지 않는다 — weather 24개가 매 요청 로그에 쌓이면 읽을 수 없게 되고,
+    기상값이라도 입력 전체를 로그에 남기는 것은 좋은 습관이 아니다.
+    """
+    t0 = time.perf_counter()
+    resp = await call_next(request)
+    ms = (time.perf_counter() - t0) * 1000
+    lvl = logging.WARNING if resp.status_code >= 400 else logging.INFO
+    log.log(lvl, "%s %s -> %s (%.0fms)", request.method, request.url.path, resp.status_code, ms)
+    return resp
 
 
 @app.get("/health")
