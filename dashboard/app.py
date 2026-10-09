@@ -25,6 +25,7 @@ from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -36,11 +37,40 @@ from app.services.predict import predict
 
 st.set_page_config(page_title="제주 계통 잉여 위험 예측", page_icon="⚡", layout="wide")
 
+# ---------------------------------------------------------------------------
+# 색 — 위험 등급은 '계열'이 아니라 '상태'다
+# ---------------------------------------------------------------------------
+# 등급은 정체성(어느 발전소인가)이 아니라 상태(얼마나 위험한가)를 뜻하므로 계열색이 아니라
+# 예약된 상태색을 쓴다. 두 색은 검증기를 통과했다 (흰 배경, light):
+#   CVD 분리 ΔE 13.9 (deutan) · 일반시야 ΔE 15.7 — 전 항목 PASS
+# '낮음'은 상태가 아니라 '상태 없음'이라 중립 회색이다 — 상태색으로 칠하면 '안전함'이라는
+# 없는 의미가 생긴다.
+#
+# 주의: serious(#ec835a)는 흰 배경에서 명도대비 2.64:1로 3:1 미만이다. 그래서 색만으로
+# 의미를 싣지 않는다 — 아이콘·범례·등급표를 항상 함께 둔다(이 파일 아래 세 곳 전부).
+RISK_CRITICAL = "#d03b3b"   # 상태색 critical
+RISK_SERIOUS = "#ec835a"    # 상태색 serious
+NEUTRAL = "#898781"         # 크롬 muted — 상태 없음
+
+# 차트 크롬 — 격자·축은 배경에서 한 단계만 떨어뜨린다(실선 헤어라인, 점선 금지)
+GRID = "#e1e0d9"
+AXIS = "#c3c2b7"
+INK_MUTED = "#898781"
+
 BAND_STYLE = {
-    "상위 5%": ("#c0392b", "매우 높음"),
-    "상위 20%": ("#e67e22", "높음"),
-    "그 외": ("#95a5a6", "낮음"),
+    "상위 5%": (RISK_CRITICAL, "매우 높음"),
+    "상위 20%": (RISK_SERIOUS, "높음"),
+    "그 외": (NEUTRAL, "낮음"),
 }
+BAND_ORDER = ["상위 5%", "상위 20%", "그 외"]
+BAND_ICON = {"상위 5%": "⬤", "상위 20%": "◐", "그 외": "○"}
+
+
+def _axis(title: str, **kw) -> alt.Axis:
+    """공통 축 — 눈금과 격자를 배경 쪽으로 눌러 데이터가 앞에 오게 한다."""
+    return alt.Axis(title=title, gridColor=GRID, gridWidth=1, domainColor=AXIS,
+                    tickColor=AXIS, labelColor=INK_MUTED, titleColor=INK_MUTED,
+                    labelFontSize=11, titleFontSize=11, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -191,16 +221,41 @@ with tab_ops:
     if res.note and "학습 분포를 벗어났" in (res.note or ""):
         st.warning(res.note)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     top5 = df[df["밴드"] == "상위 5%"]["hour"].tolist()
     c1.metric("매우 높음", f"{len(top5)}시간",
               ", ".join(f"{h}시" for h in top5) or "오늘은 없음", delta_color="off")
     c2.metric("발전량 예측 합계", f"{df['generation_forecast_mwh'].sum():,.0f} MWh")
-    c3.metric("사용 모델", res.model_used.replace("classifier_", "").replace("_calibrated_sigmoid", ""))
+    # 모델 이름은 수치가 아니다 — metric 타일에 넣으면 지표처럼 읽힌다
+    st.caption(f"사용 모델 `{res.model_used}`")
 
-    chart = df.assign(색=[BAND_STYLE[b][0] for b in df["밴드"]])
-    st.bar_chart(chart.set_index("hour")["generation_forecast_mwh"], height=220,
-                 y_label="발전량 예측 (MWh)", x_label="시각 (구간의 끝)")
+    # 등급은 색만으로 싣지 않는다 — 아이콘을 레이블에 붙여 범례·표·툴팁이 같은 말을 하게 한다
+    chart_df = df.assign(
+        등급=[f"{BAND_ICON[b]} {BAND_STYLE[b][1]}" for b in df["밴드"]],
+        발전량=df["generation_forecast_mwh"].round(1))
+    labels = [f"{BAND_ICON[b]} {BAND_STYLE[b][1]}" for b in BAND_ORDER]
+    colors = [BAND_STYLE[b][0] for b in BAND_ORDER]
+
+    base = alt.Chart(chart_df)
+    bars = base.mark_bar(cornerRadiusEnd=4).encode(
+        # paddingInner가 막대 사이 간격을 만든다 — 테두리를 그려 분리하지 않는다
+        x=alt.X("hour:O", axis=_axis("시각 (구간의 끝)", labelAngle=0),
+                scale=alt.Scale(paddingInner=0.18)),
+        y=alt.Y("발전량:Q", axis=_axis("발전량 예측 (MWh)")),
+        color=alt.Color("등급:N", title=None,
+                        scale=alt.Scale(domain=labels, range=colors),
+                        legend=alt.Legend(orient="top", direction="horizontal",
+                                          labelColor=INK_MUTED, symbolType="square")),
+        tooltip=[alt.Tooltip("hour:O", title="시각"),
+                 alt.Tooltip("발전량:Q", title="발전량 예측 (MWh)"),
+                 alt.Tooltip("등급:N", title="위험 등급")])
+    # 직접 레이블은 선택적으로 — 모든 막대에 숫자를 붙이면 읽히지 않는다. 최상위 등급만.
+    peak = base.transform_filter(alt.datum.밴드 == "상위 5%").mark_text(
+        dy=-7, fontSize=11, color=RISK_CRITICAL, fontWeight="bold").encode(
+        x=alt.X("hour:O", scale=alt.Scale(paddingInner=0.18)), y="발전량:Q",
+        text=alt.Text("발전량:Q", format=".0f"))
+    st.altair_chart((bars + peak).properties(height=260).configure_view(strokeWidth=0),
+                    use_container_width=True)
 
     if FLOOR_OK:
         st.markdown("**시간별 위험 등급** — 그날 24시간 안에서의 순위 밴드이되, "
@@ -213,7 +268,8 @@ with tab_ops:
                    "수요예측을 켜면 이 문제가 없는 경로로 전환됩니다.")
     view = df[["hour", "generation_forecast_mwh", "밴드"]].copy()
     view.columns = ["시각", "발전량 예측 (MWh)", "위험 등급"]
-    view["위험 등급"] = [f"{BAND_STYLE[b][1]} ({b})" for b in df["밴드"]]
+    # 표·범례·툴팁이 같은 아이콘을 쓴다 — 색을 못 읽어도 등급이 전달되어야 한다
+    view["위험 등급"] = [f"{BAND_ICON[b]} {BAND_STYLE[b][1]} ({b})" for b in df["밴드"]]
     view["발전량 예측 (MWh)"] = view["발전량 예측 (MWh)"].round(1)
     st.dataframe(view, hide_index=True, width="stretch",
                  column_config={"시각": st.column_config.NumberColumn(format="%d시")})
@@ -299,6 +355,46 @@ with tab_ess:
                      hide_index=True, width="stretch")
         st.caption(f"제어량 출처: {label} · 총 {sum(series):,.0f} MWh. "
                    "두 방식의 차이가 곧 '정격출력만 보면 설비가 있으면 다 해결된다고 읽히는' 오해의 크기입니다.")
+
+        # ── 민감도 곡선 ────────────────────────────────────────────────────
+        # 이 패널의 이름이 '용량 민감도'인데 그동안 한 점만 보여줬다. 설비 검토의 질문은
+        # "65MW면 얼마?"가 아니라 "얼마를 더 쓰면 얼마가 더 오르나"이고, 그건 곡선이라야 보인다.
+        # 두 계열 모두 %라 축이 하나다 — 축을 둘로 쪼개지 않는다.
+        @st.cache_data(show_spinner="용량별 흡수율을 계산하는 중…")
+        def sweep(series: tuple, hod: tuple, cap_h: int, eff: float,
+                  lo: float, hi: float) -> pd.DataFrame:
+            out = []
+            for m in range(10, 201, 10):
+                for method, name in (("storage_constrained", "저장용량 제약"),
+                                     ("hourly_capped", "정격출력만 (이론 상한)")):
+                    r = run_ess(EssSimulateRequest(
+                        hourly_curtailment_mwh=list(series), hour_of_day=list(hod),
+                        rated_power_mw=float(m), energy_capacity_mwh=float(m * cap_h),
+                        round_trip_efficiency=eff, soc_min=lo, soc_max=hi, method=method))
+                    out.append({"정격출력": m, "방식": name, "흡수율": r.absorption_rate * 100})
+            return pd.DataFrame(out)
+
+        sw = sweep(tuple(series), tuple(hod), hours, eff, soc_lo, soc_hi)
+        CAT = ["#2a78d6", "#eb6834"]          # 계열색 1·2 — 전 항목 PASS (ΔE 24.7 protan)
+        names = ["저장용량 제약", "정격출력만 (이론 상한)"]
+
+        line = alt.Chart(sw).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=28)).encode(
+            x=alt.X("정격출력:Q", axis=_axis("정격출력 (MW)")),
+            y=alt.Y("흡수율:Q", axis=_axis("흡수율 (%)"), scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("방식:N", title=None, scale=alt.Scale(domain=names, range=CAT),
+                            legend=alt.Legend(orient="top", direction="horizontal",
+                                              labelColor=INK_MUTED)),
+            tooltip=[alt.Tooltip("정격출력:Q", title="정격출력 (MW)"),
+                     alt.Tooltip("방식:N", title="방식"),
+                     alt.Tooltip("흡수율:Q", title="흡수율 (%)", format=".1f")])
+        # 지금 슬라이더 위치를 세로선으로 — 곡선 위 어디에 서 있는지가 이 패널의 요점이다
+        here = alt.Chart(pd.DataFrame({"정격출력": [mw]})).mark_rule(
+            color=INK_MUTED, strokeWidth=1).encode(x="정격출력:Q")
+        st.altair_chart((line + here).properties(height=260).configure_view(strokeWidth=0),
+                        use_container_width=True)
+        st.caption(f"세로선이 현재 설정({mw}MW)입니다. "
+                   "두 곡선의 벌어짐이 저장용량 제약의 크기이고, 오른쪽으로 갈수록 "
+                   "**곡선이 눕는 것**이 증설의 수확 체감입니다.")
 
 
 # ---------------------------------------------------------------------------
