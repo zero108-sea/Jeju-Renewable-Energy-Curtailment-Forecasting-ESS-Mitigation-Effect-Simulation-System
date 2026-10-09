@@ -118,6 +118,13 @@ def run_ess(req: EssSimulateRequest):
         soc_min=req.soc_min, soc_max=req.soc_max)
 
 
+@st.cache_data(show_spinner=False)
+def demand_curve_cached(level: float, month: int, weekend: bool) -> tuple[list[float], str]:
+    """수요 곡선 — 계산은 app.services.demand_profile이 한다(테스트가 그쪽에 붙어 있다)."""
+    from app.services.demand_profile import curve
+    return curve(level, month, weekend)
+
+
 def band_of(rank: int, n: int) -> str:
     if rank < max(1, round(n * 0.05)):
         return "상위 5%"
@@ -157,9 +164,10 @@ energy = st.sidebar.radio("에너지원", ["wind", "solar"], format_func=lambda 
 use_demand = st.sidebar.checkbox("수요예측 사용", value=True,
                                  help="수요를 넣으면 침투율 경로로 전환돼 성능이 크게 오른다 "
                                       "(풍력 PR-AUC 0.391 → 0.645)")
-demand_level = st.sidebar.slider("수요 수준 (MW)", 400, 1000, 620, 10,
+demand_level = st.sidebar.slider("일평균 수요 수준 (MW)", 400, 1000, 580, 10,
                                  disabled=not use_demand,
-                                 help="시연용 단일 값. 실제 운영에서는 24시간 수요예측 곡선을 넣는다")
+                                 help="하루 평균 수준만 정하면, 시간대별 모양은 같은 달·같은 요일형의 "
+                                      "실측 수요에서 가져옵니다")
 st.sidebar.divider()
 use_kim = st.sidebar.checkbox("KIM 일사량 예보 사용", value=True,
                              help="끄면 청천일사량 기반 추정으로 폴백한다. "
@@ -176,9 +184,11 @@ synthetic = not weather
 if synthetic:
     weather = sample_weather(target)
 
+demand_curve, prof_src = demand_curve_cached(
+    float(demand_level), target.month, target.weekday() >= 5)
 req = PredictRequest(
     energy_type=energy, region="제주", target_date=target, weather=weather,
-    demand_forecast_mw=[float(demand_level)] * 24 if use_demand else None)
+    demand_forecast_mw=demand_curve if use_demand else None)
 res = predict(req)
 
 df = pd.DataFrame([h.model_dump() for h in res.hourly])
@@ -273,6 +283,27 @@ with tab_ops:
     view["발전량 예측 (MWh)"] = view["발전량 예측 (MWh)"].round(1)
     st.dataframe(view, hide_index=True, width="stretch",
                  column_config={"시각": st.column_config.NumberColumn(format="%d시")})
+
+    if use_demand:
+        with st.expander(f"이 예측에 쓴 수요 곡선 — {prof_src}"):
+            st.caption("**침투율 = 발전량 ÷ 수요**라 분모의 모양이 결과를 바꿉니다. "
+                       "하루 평균 수준만 슬라이더로 정하고, 시간대별 모양은 같은 달·같은 "
+                       "요일형의 **실측 수요**에서 가져옵니다. 수요 *예보*가 아닙니다 — "
+                       "운영에서는 Backend가 받은 예보를 그대로 넣습니다.")
+            dc = pd.DataFrame({"시각": range(1, 25), "수요": demand_curve})
+            st.altair_chart(
+                alt.Chart(dc).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=28),
+                                        color="#2a78d6").encode(
+                    x=alt.X("시각:O", axis=_axis("시각 (구간의 끝)", labelAngle=0)),
+                    y=alt.Y("수요:Q", axis=_axis("수요 (MW)"),
+                            scale=alt.Scale(zero=False, nice=True)),
+                    tooltip=[alt.Tooltip("시각:O"), alt.Tooltip("수요:Q", title="수요 (MW)")]
+                ).properties(height=190).configure_view(strokeWidth=0),
+                use_container_width=True)
+            st.caption(f"최저 {min(demand_curve):,.0f} MW ({demand_curve.index(min(demand_curve))+1}시) · "
+                       f"최고 {max(demand_curve):,.0f} MW ({demand_curve.index(max(demand_curve))+1}시) · "
+                       f"하루 안에서 {max(demand_curve)/min(demand_curve):.2f}배 움직입니다. "
+                       "평평한 값을 넣으면 이 변동이 통째로 사라집니다.")
 
     with st.expander("왜 확률(%)을 보여주지 않는가"):
         st.markdown(f"""
