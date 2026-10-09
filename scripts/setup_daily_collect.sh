@@ -35,7 +35,14 @@ LABEL="com.jeju.kim-collect"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$REPO/.venv/bin/python"
-LOG="$REPO/logs/kim_collect.log"
+# [왜 로그가 저장소 밖인가 — 2026-10-10]
+# 처음에는 $REPO/logs/에 뒀는데 **24번 연속 exit 78(EX_CONFIG)로 실패했다.** 로그 파일에
+# 한 글자도 안 남아 원인이 안 보였는데, 그게 단서였다 — 프로세스가 시작조차 못 한 것이다.
+# 이 저장소는 ~/Downloads 아래에 있고 그곳은 macOS가 TCC로 보호한다. launchd가 띄우는
+# 프로세스에는 그 접근권이 없어서 StandardOutPath를 **열지 못하고** 그대로 죽는다.
+# 같은 파이썬·같은 WorkingDirectory로 로그 경로만 ~/Library/Logs로 바꿔 시험하니 exit 0이었다.
+# (작업디렉터리가 ~/Downloads인 것은 괜찮다 — 막히는 것은 launchd가 직접 여는 로그 파일이다.)
+LOG="$HOME/Library/Logs/kim_collect.log"
 
 if [ "${1:-}" = "remove" ]; then
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
