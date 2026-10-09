@@ -36,7 +36,8 @@ config/       SecurityConfig, WebClientConfig, GlobalExceptionHandler
 - `expected_curtailment_mwh`는 **WIND만** 값 존재, SOLAR는 항상 null +
   `note` 필드로 사유 안내 — Frontend에서 SOLAR 표시 시 note 문구 필수 노출
 - 검증 책임: Backend는 필드 존재 여부만 확인, weather 24개·중복 검증은
-  AI 서버가 전담 (위반 시 422 `INVALID_HOUR_SET`, `GlobalExceptionHandler`가 그대로 릴레이)
+  AI 서버가 전담 (위반 시 422 `INVALID_HOUR_SET`, 기상값 범위 초과 시 422 `OUT_OF_RANGE`,
+  `GlobalExceptionHandler`가 그대로 릴레이)
 - `riskLevel`, `modelVersion` 필드 제거 (실제 응답에 없음)
 - 헬스체크 엔드포인트 제거 (AI 서버에 문서화되어 있지 않음)
 
