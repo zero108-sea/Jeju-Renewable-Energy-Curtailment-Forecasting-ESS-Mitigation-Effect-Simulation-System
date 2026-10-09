@@ -37,6 +37,11 @@ from app.services.predict import predict
 
 st.set_page_config(page_title="제주 계통 잉여 위험 예측", page_icon="⚡", layout="wide")
 
+# 차트 위에 뜨는 Streamlit 요소 툴바(확대·다운로드·복사)를 숨긴다. 화면을 캡처해 문서에 넣으면
+# 그 아이콘들이 같이 찍혀 미완성으로 보인다. 기능 손실은 없다 — 데이터는 아래 표에 다 있다.
+st.markdown("<style>[data-testid='stElementToolbar']{display:none}</style>",
+            unsafe_allow_html=True)
+
 # ---------------------------------------------------------------------------
 # 색 — 위험 등급은 '계열'이 아니라 '상태'다
 # ---------------------------------------------------------------------------
@@ -239,11 +244,13 @@ with tab_ops:
     # 모델 이름은 수치가 아니다 — metric 타일에 넣으면 지표처럼 읽힌다
     st.caption(f"사용 모델 `{res.model_used}`")
 
-    # 등급은 색만으로 싣지 않는다 — 아이콘을 레이블에 붙여 범례·표·툴팁이 같은 말을 하게 한다
+    # 범례는 색 네모 + 글자라 그 자체로 '색만'이 아니다. 여기에 아이콘까지 붙였더니
+    # 기호가 둘씩(■ ⬤ 매우 높음) 찍혀 오히려 읽기 나빠졌다 — 아이콘은 색이 없는
+    # 등급표에만 둔다.
     chart_df = df.assign(
-        등급=[f"{BAND_ICON[b]} {BAND_STYLE[b][1]}" for b in df["밴드"]],
+        등급=[BAND_STYLE[b][1] for b in df["밴드"]],
         발전량=df["generation_forecast_mwh"].round(1))
-    labels = [f"{BAND_ICON[b]} {BAND_STYLE[b][1]}" for b in BAND_ORDER]
+    labels = [BAND_STYLE[b][1] for b in BAND_ORDER]
     colors = [BAND_STYLE[b][0] for b in BAND_ORDER]
 
     base = alt.Chart(chart_df)
@@ -375,6 +382,19 @@ with tab_ess:
         t = pd.DataFrame(rows)
         gap = (t.loc[1, "흡수율"] - t.loc[0, "흡수율"]) * 100
 
+        # 표시용 사본 — 원본 t는 위 지표 타일이 숫자로 쓴다.
+        # '정격출력만'은 저장용량 개념이 없어 가득 참·사이클이 정의되지 않는다. 파이썬 None이
+        # 그대로 찍히면 계산에 실패한 것처럼 보이므로, '해당 없음'을 뜻하는 —로 바꾼다.
+        # 단위도 맞춘다 — 타일은 52.5%인데 바로 아래 표가 52.5면 같은 수가 달라 보인다.
+        show = t.copy()
+        show["흡수율"] = (show["흡수율"] * 100).round(1).map(lambda v: f"{v:.1f}%")
+        for c in ("흡수량 (MWh)", "미흡수 (MWh)"):
+            show[c] = show[c].round(0).map(lambda v: f"{v:,.0f}")
+        show["가득 찬 시간"] = t["가득 찬 시간"].map(
+            lambda v: "—" if pd.isna(v) else f"{int(v):,}시간")
+        show["환산 사이클"] = t["환산 사이클"].map(
+            lambda v: "—" if pd.isna(v) else f"{v:.1f}회")
+
         m1, m2, m3 = st.columns(3)
         m1.metric("흡수율 (정식)", f"{t.loc[0, '흡수율'] * 100:.1f}%",
                   f"이론 상한 대비 −{gap:.1f}%p", delta_color="inverse")
@@ -382,8 +402,9 @@ with tab_ess:
                   help="이 잔량이 '언제 쓸 것인가'를 푸는 이 시스템의 존재 이유입니다")
         m3.metric("설비", f"{mw} MW / {mw * hours} MWh")
 
-        st.dataframe(t.assign(흡수율=(t["흡수율"] * 100).round(1)).round(1),
-                     hide_index=True, width="stretch")
+        st.dataframe(show, hide_index=True, width="stretch")
+        st.caption("'가득 찬 시간'과 '환산 사이클'은 저장용량이 있는 방식에서만 정의됩니다. "
+                   "정격출력만 보는 이론 상한에서는 해당 없음(—)입니다.")
         st.caption(f"제어량 출처: {label} · 총 {sum(series):,.0f} MWh. "
                    "두 방식의 차이가 곧 '정격출력만 보면 설비가 있으면 다 해결된다고 읽히는' 오해의 크기입니다.")
 
@@ -421,7 +442,23 @@ with tab_ess:
         # 지금 슬라이더 위치를 세로선으로 — 곡선 위 어디에 서 있는지가 이 패널의 요점이다
         here = alt.Chart(pd.DataFrame({"정격출력": [mw]})).mark_rule(
             color=INK_MUTED, strokeWidth=1).encode(x="정격출력:Q")
-        st.altair_chart((line + here).properties(height=260).configure_view(strokeWidth=0),
+        # 직접 레이블은 **두 곡선이 가장 벌어진 지점**에 붙인다. 끝점에 붙였더니 거기서 두 선이
+        # 수렴해 레이블끼리 겹치고 축 밖으로 넘쳤다 — 겹치는 레이블은 없는 것보다 나쁘다.
+        # 최대 격차 지점은 이 패널이 말하려는 지점이기도 하다(저장용량 제약의 크기).
+        w_ = sw.pivot(index="정격출력", columns="방식", values="흡수율")
+        at = (w_[names[1]] - w_[names[0]]).idxmax()
+        spot = sw[sw["정격출력"] == at]
+        # dy는 encode()의 인자가 아니라 mark_text의 속성이다 — 위/아래로 비키려면 계열마다
+        # 레이어를 따로 둔다. 위 곡선은 위로, 아래 곡선은 아래로 민다.
+        # 위 곡선 레이블은 **왼쪽 위**로 뺀다 — 오른쪽은 곡선이 올라오는 쪽이라 글자가 선에 닿는다.
+        # 아래 곡선은 오른쪽 아래로 빼면 비어 있다.
+        tips = alt.layer(*[
+            alt.Chart(spot[spot["방식"] == nm]).mark_text(
+                align=al, dx=dx, dy=dy, fontSize=11, fontWeight="bold", color=col
+            ).encode(x="정격출력:Q", y="흡수율:Q", text="방식:N")
+            for nm, col, al, dx, dy in ((names[1], CAT[1], "right", -8, -14),
+                                        (names[0], CAT[0], "left", 8, 16))])
+        st.altair_chart((line + here + tips).properties(height=260).configure_view(strokeWidth=0),
                         use_container_width=True)
         st.caption(f"세로선이 현재 설정({mw}MW)입니다. "
                    "두 곡선의 벌어짐이 저장용량 제약의 크기이고, 오른쪽으로 갈수록 "
