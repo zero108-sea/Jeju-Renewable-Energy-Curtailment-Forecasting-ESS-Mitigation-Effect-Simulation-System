@@ -435,8 +435,54 @@ with tab_val:
                 st.info(f"`{fname}`이 없습니다 — 해당 학습 스크립트를 먼저 실행하세요.")
 
     st.divider()
-    st.markdown("""
-**이 화면이 보여주지 않는 것** — 실제 예보 입력으로 낸 운영 성능. 예보 아카이브가 없어
-소급 측정이 불가능하고(API 보관이 하루), 예보와 실측을 매일 축적하는 중입니다
-(`scripts/kim_validation_log.py`). 현재 수치는 **상한**입니다.
-""")
+    st.subheader("KIM 일사량 예보 — 정방향 축적 중간 측정")
+    st.caption("위 표들이 '실측 입력 기준 상한'이라면, 이것은 **실제 예보 입력**으로 낸 값입니다. "
+               "예보 아카이브가 없어 소급 측정이 불가능해(API 보관이 하루) 매일 쌓는 중입니다.")
+
+    @st.cache_data(show_spinner=False, ttl=600)
+    def kim_compare():
+        """CLI(`kim_validation_log.py report`)와 **같은 함수**를 부른다 — 화면과 CLI가
+        다른 숫자를 말하면 어느 쪽도 못 믿는다."""
+        from app.services.kim_validation import compare
+        return compare()
+
+    try:
+        cmp_ = kim_compare()
+    except Exception as e:                                        # noqa: BLE001
+        cmp_ = None
+        st.info(f"아직 비교할 수 없습니다: {type(e).__name__}: {e}")
+
+    if cmp_ is None:
+        st.info("수집된 예보와 ASOS 실측이 겹치는 시간이 아직 없습니다. "
+                "`scripts/kim_validation_log.py collect`를 며칠 돌린 뒤 실측을 내려받으세요.")
+    else:
+        st.markdown(f"예보 **{cmp_.log_days}일** 수집 ({cmp_.first} ~ {cmp_.last}) · "
+                    f"실측과 겹치는 **{cmp_.n_days}일 / 주간 {cmp_.n_hours}시간**")
+        if cmp_.too_few:
+            # 결론으로 읽히는 것을 막는 것이 이 화면의 가장 중요한 임무다
+            st.warning("**표본이 적어 결론이 아닙니다(10일 미만).** 아래 수치는 경향만 읽어주세요. "
+                       "특히 이 구간은 예년보다 크게 흐려, 맑은 날 표본이 거의 없습니다.")
+        st.dataframe(cmp_.summary, hide_index=True, width="stretch")
+        st.caption("MAE·NMAE가 낮을수록 좋습니다. **KIM이 '추정(예보 운량)'보다 낮아야** 교체가 "
+                   "옳았다는 증거가 됩니다. '추정(실측 운량)'은 운량 예보가 완벽했다면의 값이라, "
+                   "그것과의 차이가 **운량 예보 탓인 오차**입니다.")
+
+        d = cmp_.daily.copy()
+        d["과대배수"] = (d["KIM"] / d["실측"]).round(2)
+        line = alt.Chart(d.melt("target_date", ["KIM", "실측"],
+                                var_name="경로", value_name="일적산")).mark_line(
+            strokeWidth=2, point=alt.OverlayMarkDef(size=45)).encode(
+            x=alt.X("target_date:O", axis=_axis("거래일", labelAngle=-40)),
+            y=alt.Y("일적산:Q", axis=_axis("일적산 (MJ/m²)")),
+            color=alt.Color("경로:N", title=None,
+                            scale=alt.Scale(domain=["KIM", "실측"], range=["#2a78d6", "#eb6834"]),
+                            legend=alt.Legend(orient="top", direction="horizontal",
+                                              labelColor=INK_MUTED)),
+            tooltip=[alt.Tooltip("target_date:O", title="거래일"),
+                     alt.Tooltip("경로:N"), alt.Tooltip("일적산:Q", format=".2f")])
+        st.altair_chart(line.properties(height=240).configure_view(strokeWidth=0),
+                        use_container_width=True)
+        st.dataframe(d, hide_index=True, width="stretch")
+        st.caption("**흐린 날일수록 과대배수가 큽니다** — 두 선의 간격이 맑은 날 좁아집니다. "
+                   "지금의 과대예측이 KIM의 결함인지 흐린 날만 모인 표본 탓인지는 "
+                   "맑은 날 표본이 더 쌓여야 갈립니다.")

@@ -106,85 +106,29 @@ def collect(target: dt.date, force: bool = False) -> None:
     print(f"   ASOS 실측은 보통 며칠 뒤 올라옵니다. 그 뒤 report로 비교하세요.")
 
 
-def _estimate_with_observed_cloud(asos: pd.DataFrame, dts: pd.Series) -> pd.Series:
-    """추정 모델에 ASOS 실측 운량을 넣어 돌린다 — 운량 예보 오차를 제거한 상한.
-
-    현행 폴백(추정 + 단기예보 SKY)과의 차이가 곧 '운량 예보가 만든 오차'다. 둘을 나란히 보지
-    않으면 과대예측이 모델 탓인지 예보 탓인지 영원히 알 수 없다.
-    """
-    import numpy as np
-
-    from app.data_prep import add_time_features
-    from app.model_io import load_artifact
-    from app.solar_radiation import add_solar_geometry, sky_from_cloud
-    from app.training.train_radiation_model import NIGHT_MJ
-
-    w = asos[asos["dt"].isin(set(dts))].copy().reset_index(drop=True)
-    if w.empty:
-        return pd.Series(index=dts.index, dtype=float)
-    w = add_solar_geometry(add_time_features(w), "184")
-    w["sky"] = sky_from_cloud(w["cloud"])
-    art = load_artifact("radiation_estimator")
-    out = np.zeros(len(w))
-    m = (w["clear_sky_mj"] > NIGHT_MJ).to_numpy()
-    if m.any():
-        p = art["model"].predict(w.loc[m, art["features"]])
-        if (art["meta"].get("target") or "").startswith("clear_sky_index"):
-            p = np.clip(p, 0, 1.2) * w.loc[m, "clear_sky_mj"].to_numpy()
-        out[m] = np.clip(p, 0, None)
-    return dts.map(dict(zip(w["dt"], out)))
-
-
 def report() -> None:
+    """비교 계산은 app.services.kim_validation이 한다 — 대시보드와 같은 함수를 써야
+    화면과 CLI가 다른 숫자를 말하는 일이 없다. 여기는 출력만 맡는다."""
+    from app.services.kim_validation import MIN_DAYS, compare
+
     if not os.path.exists(LOG):
         sys.exit(f"기록이 없습니다: {LOG}\n먼저 collect를 며칠 돌려야 합니다.")
-    log = pd.read_csv(LOG, dtype={"tmfc": str, "target_date": str})
-    dup = int(log.duplicated(subset=["target_date", "tmfc", "hour"]).sum())
-    if dup:
-        print(f"⚠ 중복 {dup}행이 있습니다 — collect를 한 번 더 돌리면 정리됩니다.")
-        log = log.drop_duplicates(subset=["target_date", "tmfc", "hour"], keep="last")
-    log["dt"] = (pd.to_datetime(log["target_date"])
-                 + pd.to_timedelta(log["hour"], unit="h"))
-    print(f"예보 기록 {log['target_date'].nunique()}일 / {len(log)}행 "
-          f"({log['target_date'].min()} ~ {log['target_date'].max()})")
-
-    from app.data_prep import load_asos
-    asos = load_asos("184")
-    obs = asos[["dt", "solar_rad"]].rename(columns={"solar_rad": "실측"})
-    j = log.merge(obs, on="dt", how="inner").dropna(subset=["실측"])
-    if j.empty:
+    c = compare(LOG)
+    if c is None:
         print("\nASOS 실측과 겹치는 시간이 아직 없습니다. 관측자료가 올라온 뒤 다시 실행하세요.")
         print("  (기상자료개방포털 ASOS 시간자료를 data/에 내려놓아야 합니다)")
         return
-
-    day = j[(j["실측"] > 0.02) | (j["kim_mj"] > 0.02)]
-    print(f"\n실측과 겹치는 {j['target_date'].nunique()}일 / 주간 {len(day)}시간")
-    if j["target_date"].nunique() < 10:
-        print("  ⚠ 표본이 적습니다 — 아래 수치는 경향만 읽고 결론으로 쓰지 마세요.")
-
-    # 추정 모델에 '실측 운량'을 넣은 경로를 함께 낸다 — 오차가 모델에서 오는지 운량 예보에서
-    # 오는지 가르는 유일한 방법이다. 이것 없이는 "예보가 틀렸다"와 "모델이 틀렸다"를 구분할 수 없다.
-    day["추정_실측운량"] = _estimate_with_observed_cloud(asos, day["dt"])
-
-    print(f"\n{'경로':16} {'MAE':>8} {'NMAE':>8} {'편향':>8} {'상관':>7} {'일적산비':>9}")
-    for name, col in (("KIM 예보", "kim_mj"), ("KIM 순간값", "kim_inst_mj"),
-                      ("추정(예보 운량)", "est_mj"), ("추정(실측 운량)", "추정_실측운량")):
-        if col not in day or day[col].isna().all():
-            print(f"{name:10} {'기록 없음':>8}")
-            continue
-        d = day[col] - day["실측"]
-        mae = d.abs().mean()
-        nmae = 100 * mae / day["실측"].mean() if day["실측"].mean() else np.nan
-        print(f"{name:16} {mae:8.3f} {nmae:7.1f}% {d.mean():+8.3f} "
-              f"{day[col].corr(day['실측']):7.3f} {day[col].sum()/day['실측'].sum():9.3f}")
+    if c.dup_dropped:
+        print(f"⚠ 중복 {c.dup_dropped}행이 있습니다 — collect를 한 번 더 돌리면 정리됩니다.")
+    print(f"예보 기록 {c.log_days}일 ({c.first} ~ {c.last})")
+    print(f"\n실측과 겹치는 {c.n_days}일 / 주간 {c.n_hours}시간")
+    if c.too_few:
+        print(f"  ⚠ 표본이 적습니다({MIN_DAYS}일 미만) — 경향만 읽고 결론으로 쓰지 마세요.")
+    print()
+    print(c.summary.to_string(index=False))
     print("\nMAE·NMAE가 낮을수록 좋다. KIM이 '추정(예보 운량)'보다 낮으면 교체가 옳았다는 증거다.")
     print("'추정(실측 운량)'은 운량 예보가 완벽했다면의 값이다 — 그것과의 차이가 예보 오차 몫이다.")
-
-    # 일별 일적산 대조 — 특정 날짜만 크게 틀렸는지 확인한다
-    j = j.merge(day[["dt", "추정_실측운량"]], on="dt", how="left")
-    dd = j.groupby("target_date")[["kim_mj", "est_mj", "추정_실측운량", "실측"]].sum().round(2)
-    dd.columns = ["KIM", "추정(예보운량)", "추정(실측운량)", "실측"]
-    print(f"\n일적산 (MJ/m²)\n{dd.to_string()}")
+    print(f"\n일적산 (MJ/m²)\n{c.daily.to_string(index=False)}")
 
 
 if __name__ == "__main__":
