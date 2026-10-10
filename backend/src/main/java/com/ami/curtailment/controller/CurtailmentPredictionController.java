@@ -31,13 +31,19 @@ public class CurtailmentPredictionController {
     private final CurtailmentPredictionRepository curtailmentPredictionRepository;
 
     // 지역별 저장된 예측 결과 조회 (DB 조회, AI 서버 호출 아님)
+    // 기본은 시각별 최신 1건. 같은 날짜를 여러 번 예측하면 24행씩 계속 쌓이므로(재학습 전후
+    // 비교용 이력 보존) 조회에서 중복을 걷어낸다. 전체 이력은 ?history=true.
     // 통신규격 v1.1 07장 버그 수정: CurtailmentPrediction 엔티티를 직접 반환하면 region이
     // Hibernate 지연 로딩 프록시로 남아 Jackson 직렬화가 500으로 실패함 - 응답 전용 DTO로 변환
     @Transactional(readOnly = true)
     @GetMapping("/{regionId}")
-    public List<CurtailmentPredictionView> getPredictions(@PathVariable Long regionId) {
-        return curtailmentPredictionRepository.findByRegionIdOrderByTargetHourDesc(regionId)
-                .stream()
+    public List<CurtailmentPredictionView> getPredictions(
+            @PathVariable Long regionId,
+            @RequestParam(name = "history", defaultValue = "false") boolean history) {
+        List<CurtailmentPrediction> rows = history
+                ? curtailmentPredictionRepository.findByRegionIdOrderByTargetHourDesc(regionId)
+                : curtailmentPredictionRepository.findLatestByRegionId(regionId);
+        return rows.stream()
                 .map(CurtailmentPredictionView::new)
                 .toList();
     }
