@@ -10,8 +10,10 @@
 2) **ESS 패널을 운영 화면에서 분리한다.** 운영자가 보는 하루전 판단과, 설비 검토용
    민감도 분석은 의사결정 주체와 시점이 다르다. 한 화면에 섞으면 ESS 슬라이더가
    예측 신뢰도처럼 읽힌다.
-3) **서버를 띄우지 않고 직접 호출한다.** 시연 중 FastAPI 프로세스가 죽으면 복구할 시간이
-   없다. 같은 서비스 함수를 in-process로 부르므로 동작이 API와 동일하다.
+3) **REST가 기본, in-process가 폴백이다.** 예측은 Backend(Spring, POST /api/predictions)를
+   거쳐 AI 서버로 간다(작품소개서 4.1의 구조). Backend나 AI 서버가 죽으면 같은 서비스 함수를
+   in-process로 불러 화면을 살린다 — 시연 중 프로세스가 죽어도 복구할 시간이 없다. 어느 경로로
+   실행됐는지는 화면에 항상 표시한다(조용한 폴백은 REST가 검증된 것처럼 보이게 만든다).
 
 [일부러 넣지 않은 것]
 제어량(MWh) 절대값 예측 카드. 2단계 회귀 R²가 0.068이고 산포가 실측의 0.38배다 —
@@ -19,15 +21,18 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import altair as alt
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
 from app.schemas import EssSimulateRequest, PredictRequest
@@ -160,6 +165,74 @@ def apply_bands(df: pd.DataFrame, key: str) -> tuple[pd.DataFrame, float, bool]:
 
 
 # ---------------------------------------------------------------------------
+# 예측 호출 — REST(Backend) 기본, in-process 폴백
+# ---------------------------------------------------------------------------
+
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8080")
+
+# Backend는 지역명으로 Region을 찾고 energySource(WIND/SOLAR)가 지역마다 하나로 고정돼 있다.
+# 그래서 에너지원별로 미리 등록한 지역명을 쓴다 (curl로 한 번 등록, README 참고).
+BACKEND_REGION = {"wind": "제주-풍력", "solar": "제주-태양광"}
+
+
+def backend_rows_to_result(rows: list[dict]) -> dict:
+    """Backend POST /api/predictions 응답(엔티티 24개) -> AI 서버 /predict 응답 모양.
+
+    Backend는 24시를 '다음날 00:00'으로 저장하므로 0시를 24시로 되돌린다.
+    모델명·임계값·note는 24행에 같은 값이 반복되므로 첫 행에서 꺼낸다.
+    """
+    if not rows:
+        raise ValueError("Backend가 빈 응답을 돌려줬습니다")
+    hourly = []
+    for r in rows:
+        h = datetime.fromisoformat(r["targetHour"]).hour
+        hourly.append({
+            "hour": 24 if h == 0 else h,
+            "generation_forecast_mwh": r["generationForecastMwh"],
+            "curtailment_probability": r["curtailmentProbability"],
+            "expected_curtailment_mwh": r.get("curtailmentMwh"),
+        })
+    hourly.sort(key=lambda x: x["hour"])
+    if [x["hour"] for x in hourly] != list(range(1, 25)):
+        raise ValueError(f"1~24시가 아닌 응답입니다: {[x['hour'] for x in hourly]}")
+    first = rows[0]
+    return {
+        "hourly": hourly,
+        "model_used": first["modelUsed"],
+        "model_trained_at": first.get("modelTrainedAt"),
+        "operational_threshold": first.get("operationalThreshold"),
+        "operational_threshold_reliable": first.get("operationalThresholdReliable"),
+        "note": first.get("note"),
+    }
+
+
+@st.cache_data(show_spinner="Backend에 예측 요청 중…", ttl=1800)
+def _backend_predict(body_json: str) -> dict:
+    """같은 조건이면 다시 부르지 않는다 — Backend는 호출마다 24행을 DB에 저장하므로,
+    Streamlit이 위젯을 만질 때마다 재실행되는 것을 그대로 두면 같은 예측이 계속 쌓인다.
+    (예외는 캐시되지 않는다.)"""
+    r = requests.post(f"{BACKEND_URL}/api/predictions", data=body_json.encode("utf-8"),
+                      headers={"Content-Type": "application/json"}, timeout=(3, 60))
+    if not r.ok:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+    return backend_rows_to_result(r.json())
+
+
+def run_predict(req: PredictRequest, use_rest: bool) -> tuple[SimpleNamespace, str, str | None]:
+    """(결과, 경로 'rest'|'inproc', 폴백 사유) — 호출자는 경로를 화면에 반드시 띄운다."""
+    err = None
+    if use_rest:
+        body = req.model_dump(mode="json")
+        body["region"] = BACKEND_REGION[req.energy_type]
+        try:
+            d = _backend_predict(json.dumps(body, ensure_ascii=False, sort_keys=True))
+            return SimpleNamespace(**d), "rest", None
+        except Exception as e:                                    # noqa: BLE001
+            err = f"{type(e).__name__}: {e}"
+    return SimpleNamespace(**predict(req).model_dump()), "inproc", err
+
+
+# ---------------------------------------------------------------------------
 # 사이드바
 # ---------------------------------------------------------------------------
 
@@ -178,6 +251,10 @@ use_kim = st.sidebar.checkbox("KIM 일사량 예보 사용", value=True,
                              help="끄면 청천일사량 기반 추정으로 폴백한다. "
                                   "정보 손실 +2.99%p가 이 차이다")
 st.sidebar.caption("기상청 인증키(`KMA_AUTH_KEY`)가 없으면 합성 입력으로 화면만 보여줍니다.")
+st.sidebar.divider()
+use_rest = st.sidebar.checkbox("Backend REST로 예측", value=True,
+                               help=f"켜면 {BACKEND_URL}/api/predictions를 거칩니다(결과가 DB에 저장됨). "
+                                    "Backend가 응답하지 않으면 in-process로 자동 폴백하고 화면에 사유를 표시합니다.")
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +271,9 @@ demand_curve, prof_src = demand_curve_cached(
 req = PredictRequest(
     energy_type=energy, region="제주", target_date=target, weather=weather,
     demand_forecast_mw=demand_curve if use_demand else None)
-res = predict(req)
+res, PRED_PATH, PRED_ERR = run_predict(req, use_rest)
 
-df = pd.DataFrame([h.model_dump() for h in res.hourly])
+df = pd.DataFrame(res.hourly)
 def path_from_model(model_used: str) -> str:
     """서버가 실제로 쓴 모델 이름에서 경로 키를 얻는다.
 
@@ -224,6 +301,13 @@ tab_ops, tab_ess, tab_val = st.tabs(["하루전 위험 예측", "ESS 완화효�
 
 with tab_ops:
     st.subheader(f"{target} · {'풍력' if energy == 'wind' else '태양광'} · 시간별 잉여 위험")
+
+    if PRED_PATH == "rest":
+        st.caption(f"예측 경로: **Backend REST** ({BACKEND_URL}) → AI 서버 · 결과는 DB에 저장됨")
+    elif use_rest:
+        st.warning(f"**in-process로 폴백했습니다** — Backend REST 호출 실패: {PRED_ERR}")
+    else:
+        st.caption("예측 경로: **in-process** (사이드바에서 REST를 껐습니다)")
 
     if synthetic:
         st.error(f"**합성 입력입니다 — 예보가 아닙니다.** 기상청 예보를 받지 못했습니다: {err}\n\n"
@@ -336,6 +420,8 @@ with tab_ops:
 
 with tab_ess:
     st.subheader("ESS 완화효과 — 설비 용량 민감도")
+    st.caption("계산 경로: in-process. 용량별 수십 회를 도는 민감도 곡선이라 Backend의 저장용 "
+               "API(`/api/ess-simulations`)를 쓰지 않습니다.")
     st.info("**이 패널은 하루전 운영 판단과 분리돼 있습니다.** 여기서 쓰는 제어량은 "
             "2023년 **실측** 출력제어량이고, 왼쪽 예측값이 아닙니다 — 예측 기댓값을 넣으면 "
             "흡수율이 실측 36.8% 대비 80.6%로 과대평가됩니다(README '알려진 한계').")
