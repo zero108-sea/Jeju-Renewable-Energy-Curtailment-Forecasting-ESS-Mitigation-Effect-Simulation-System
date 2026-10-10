@@ -19,3 +19,8 @@ logs/
 # 2026-10-06에 제거됨(백업은 ~/Documents/제출문서_백업/). 다시 생겨도 커밋되지 않도록 규칙만 남겨둔다
 docs/submission/
 .idea/
+
+# AI model artifacts - never commit
+models/
+*.joblib
+models.zip
