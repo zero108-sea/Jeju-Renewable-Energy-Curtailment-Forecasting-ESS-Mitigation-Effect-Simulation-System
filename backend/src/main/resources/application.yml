@@ -1,26 +1,25 @@
 spring:
   application:
-    name: ami-anomaly-backend
+    name: curtailment-backend
 
-  # DB 연결 정보 - 로컬 개발 시 본인 환경에 맞게 수정
   datasource:
-    url: jdbc:postgresql://localhost:5432/ami_db
+    url: jdbc:postgresql://localhost:5432/curtailment_db
     username: postgres
-    password: postgres
+    password: ${DB_PASSWORD:postgres}   # <-- postgres 설치 시 정한 실제 비밀번호로 변경
     driver-class-name: org.postgresql.Driver
 
   jpa:
     hibernate:
-      ddl-auto: update   # 개발 중엔 update, 배포 시엔 validate 권장
+      ddl-auto: update
     show-sql: true
     properties:
       hibernate:
         format_sql: true
-        dialect: org.hibernate.dialect.PostgreSQLDialect
 
 server:
   port: 8080
 
 # Python AI 서버 주소 (내부 통신 전용, 외부 비노출)
+# 통신규격 확정서 v1.1(04장) 기준: uvicorn app.main:app --port 8000
 ai-server:
   base-url: http://localhost:8000
