@@ -56,6 +56,11 @@ public class CurtailmentPredictionController {
     @PostMapping
     public List<CurtailmentPrediction> predict(@RequestBody PredictionRequest request) {
         Region region = regionRepository.findByName(request.getRegion());
+        if (region == null) {
+            // 미등록 지역이면 AI 서버를 부르기 전에 400으로 끝낸다 (GlobalExceptionHandler가 INVALID_REQUEST로 변환).
+            // 이전에는 region이 null인 채로 저장을 시도해 DB 제약 위반(500)으로 터졌다.
+            throw new IllegalArgumentException("등록되지 않은 지역입니다: " + request.getRegion());
+        }
         LocalDate targetDate = LocalDate.parse(request.getTarget_date());
 
         PredictionResponse response = aiClientService.predict(request);
@@ -66,7 +71,7 @@ public class CurtailmentPredictionController {
     }
 
     private CurtailmentPrediction saveOne(Region region, LocalDate targetDate,
-                                            PredictionResponse response, HourlyPrediction hp) {
+                                          PredictionResponse response, HourlyPrediction hp) {
         CurtailmentPrediction prediction = new CurtailmentPrediction();
         prediction.setRegion(region);
         // 원본 데이터셋 관례: 1~23시는 그날 해당 시각, 24시는 "자정"=다음날 00:00.
